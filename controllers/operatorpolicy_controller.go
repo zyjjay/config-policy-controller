@@ -11,12 +11,15 @@ import (
 
 	operatorv1 "github.com/operator-framework/api/pkg/operators/v1"
 	operatorv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
+	depclient "github.com/stolostron/kubernetes-dependency-watches/client"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	policyv1 "open-cluster-management.io/config-policy-controller/api/v1"
 	policyv1beta1 "open-cluster-management.io/config-policy-controller/api/v1beta1"
@@ -31,13 +34,16 @@ var OpLog = ctrl.Log.WithName(OperatorControllerName)
 // OperatorPolicyReconciler reconciles a OperatorPolicy object
 type OperatorPolicyReconciler struct {
 	client.Client
+	DynamicWatcher depclient.DynamicWatcher
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *OperatorPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+// SetupWithManager sets up the controller with the Manager and will reconcile when the dynamic watcher
+// sees that an object is updated
+func (r *OperatorPolicyReconciler) SetupWithManager(mgr ctrl.Manager, depEvents *source.Channel) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(OperatorControllerName).
 		For(&policyv1beta1.OperatorPolicy{}).
+		Watches(depEvents, &handler.EnqueueRequestForObject{}).
 		Complete(r)
 }
 
@@ -60,13 +66,40 @@ var _ reconcile.Reconciler = &OperatorPolicyReconciler{}
 func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	policy := &policyv1beta1.OperatorPolicy{}
 
+	policyObjectID := depclient.ObjectIdentifier{
+		Group:     operatorv1.GroupVersion.Group,
+		Version:   operatorv1.GroupVersion.Version,
+		Kind:      "OperatorPolicy",
+		Namespace: req.Namespace,
+		Name:      req.Name,
+	}
+
+	// get the operator policy on the cluster
 	err := r.Get(ctx, req.NamespacedName, policy)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			OpLog.Info("Operator policy could not be found")
 
+			err := r.DynamicWatcher.RemoveWatcher(policyObjectID)
+			if err != nil {
+				OpLog.Error(err, "Error updating dependency watcher. Ignoring the failure.")
+			}
+
 			return reconcile.Result{}, nil
 		}
+
+		OpLog.Error(err, "Failed to get operator policy")
+
+		return reconcile.Result{}, err
+	}
+
+	// handle the policy
+	OpLog.Info("Reconciling OperatorPolicy", "policy", policy.Name)
+	err = r.handleSinglePolicy(policy)
+	if err != nil {
+		OpLog.Error(err, "Error while evaluating operator policy")
+
+		return reconcile.Result{}, err
 	}
 
 	return reconcile.Result{}, nil
@@ -129,9 +162,9 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 
 	subscriptionSpec := new(operatorv1alpha1.Subscription)
 	err := r.Get(context.TODO(),
-		types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: subscriptionSpec.Name},
+		types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
 		subscriptionSpec)
-	exists := !errors.IsNotFound(err)
+	exists := err == nil || !errors.IsNotFound(err)
 	shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
 
 	// Object does not exist but it should exist, create object
@@ -148,19 +181,63 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 				return err
 			}
 
+			csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
+
+			go func() {
+				defer close(csvChan)
+				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
+				err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
+
+				csvChan <- csvData
+			}()
+
 			// Currently creates an OperatorGroup for every Subscription
 			// in the same ns, and defaults to targeting all ns.
 			// Future implementations will enable targeting ns based on
 			// installModes supported by the CSV. Also, only one OperatorGroup
 			// should exist in each ns
-			operatorGroup := buildOperatorGroup(policy)
-			err = r.Create(context.TODO(), operatorGroup)
+
+			// if policy contains no operatorgroup spec, check if there is allnamespaces
+			// if not, create one
+
+			if policy.Spec.OperatorGroup != nil {
+				operatorGroup := buildOperatorGroup(policy)
+				if operatorGroup != nil {
+					err = r.Create(context.TODO(), operatorGroup)
+				}
+			} else {
+				ogSpec := new(operatorv1.OperatorGroup)
+				err := r.Get(context.TODO(),
+					types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: "all-ns-og"}, ogSpec)
+				exists = !errors.IsNotFound(err)
+
+				if !exists {
+					gvk := schema.GroupVersionKind{
+						Group:   "operators.coreos.com",
+						Version: "v1",
+						Kind:    "OperatorGroup",
+					}
+
+					ogSpec.SetGroupVersionKind(gvk)
+					ogSpec.ObjectMeta.SetName("all-ns-og")
+					ogSpec.ObjectMeta.SetNamespace(subscriptionSpec.Namespace)
+
+					err = r.Create(context.TODO(), ogSpec)
+				}
+			}
 
 			if err != nil {
 				r.setCompliance(policy, policyv1.NonCompliant)
 				OpLog.Error(err, "Could not handle missing musthave object")
 
 				return err
+			}
+
+			csvs := <-csvChan
+
+			for i := range csvs.Items {
+				deployment := csvs.Items[i]
+				_ = deployment
 			}
 
 			r.setCompliance(policy, policyv1.Compliant)
@@ -260,6 +337,33 @@ func (r *OperatorPolicyReconciler) shouldEvaluatePolicy(
 	return true
 }
 
+func (r *OperatorPolicyReconciler) busyWaitForCSV(
+	timeout time.Duration,
+	csv *operatorv1alpha1.ClusterServiceVersionList,
+	subscription *operatorv1alpha1.Subscription,
+) error {
+	csvSpecs := operatorv1alpha1.ClusterServiceVersionList{}
+	subscriptionSpec := new(operatorv1alpha1.Subscription)
+	start := time.Now()
+
+	for {
+		err := r.Get(context.TODO(),
+			types.NamespacedName{Namespace: subscription.Namespace, Name: subscription.Name},
+			subscriptionSpec)
+		if err != nil {
+			return err
+		}
+		err = r.List(context.TODO(), &csvSpecs)
+		if err == nil {
+			*csv = csvSpecs
+		}
+		elapsed := time.Since(start)
+		if elapsed >= timeout {
+			return err
+		}
+	}
+}
+
 // buildSubscription bootstraps the subscription spec defined in the operator policy
 // with the apiversion and kind in preparation for resource creation
 func buildSubscription(
@@ -298,6 +402,11 @@ func (r *OperatorPolicyReconciler) setCompliance(
 func buildOperatorGroup(
 	policy *policyv1beta1.OperatorPolicy,
 ) *operatorv1.OperatorGroup {
+
+	if policy.Spec.OperatorGroup == nil {
+		return nil
+	}
+
 	operatorGroup := new(operatorv1.OperatorGroup)
 
 	gvk := schema.GroupVersionKind{
@@ -307,9 +416,9 @@ func buildOperatorGroup(
 	}
 
 	operatorGroup.SetGroupVersionKind(gvk)
-	operatorGroup.ObjectMeta.SetName(policy.Spec.Subscription.Package + "-operator-group")
-	operatorGroup.ObjectMeta.SetNamespace(policy.Spec.Subscription.Namespace)
-	operatorGroup.Spec.TargetNamespaces = []string{"*"}
+	operatorGroup.ObjectMeta.SetName(policy.Spec.OperatorGroup.Name)
+	operatorGroup.ObjectMeta.SetNamespace(policy.Spec.OperatorGroup.Namespace)
+	operatorGroup.Spec.TargetNamespaces = policy.Spec.OperatorGroup.Target.Namespace
 
 	return operatorGroup
 }
