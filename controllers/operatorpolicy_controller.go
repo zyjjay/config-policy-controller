@@ -229,6 +229,10 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 	shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
 
 	// Object does not exist but it should exist, create object
+	// Create new watches on subscription, CSV/Deployments(?), InstallPlan, operatorgroup(?), catalogsources
+	// Does CSV contain info regarding updates?
+	// Most likely, just need to watch the deployments that is created for the operator installation
+	// Should include all resources that contributes to the status field of the operator policy (check docs)
 	if !exists && shouldExist {
 		if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
 			OpLog.Info("creating kind " + subscriptionSpec.Kind + " in ns " + subscriptionSpec.Namespace)
