@@ -66,7 +66,7 @@ var _ reconcile.Reconciler = &OperatorPolicyReconciler{}
 func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	policy := &policyv1beta1.OperatorPolicy{}
 
-	policyObjectID := depclient.ObjectIdentifier{
+	watcher := depclient.ObjectIdentifier{
 		Group:     operatorv1.GroupVersion.Group,
 		Version:   operatorv1.GroupVersion.Version,
 		Kind:      "OperatorPolicy",
@@ -80,7 +80,7 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		if errors.IsNotFound(err) {
 			OpLog.Info("Operator policy could not be found")
 
-			err := r.DynamicWatcher.RemoveWatcher(policyObjectID)
+			err := r.DynamicWatcher.RemoveWatcher(watcher)
 			if err != nil {
 				OpLog.Error(err, "Error updating dependency watcher. Ignoring the failure.")
 			}
@@ -95,6 +95,105 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// handle the policy
 	OpLog.Info("Reconciling OperatorPolicy", "policy", policy.Name)
+
+	err = r.DynamicWatcher.StartQueryBatch(watcher)
+	if err != nil {
+		panic(err)
+	}
+
+	// check for subscription
+	subscriptionSpec := new(operatorv1alpha1.Subscription)
+	err = r.Get(context.TODO(),
+		types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
+		subscriptionSpec)
+	exists := err == nil || !errors.IsNotFound(err)
+	shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
+
+	// Subscription does not exist but it should exist
+	if !exists && shouldExist {
+		if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
+			OpLog.Info("creating kind " + subscriptionSpec.Kind + " in ns " + subscriptionSpec.Namespace)
+			subscriptionSpec := buildSubscription(policy, subscriptionSpec)
+			err = r.Create(context.TODO(), subscriptionSpec)
+
+			if err != nil {
+				r.setCompliance(policy, policyv1.NonCompliant)
+				OpLog.Error(err, "Could not handle missing musthave object")
+
+				return reconcile.Result{}, err
+			}
+
+			csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
+
+			go func() {
+				defer close(csvChan)
+				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
+				err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
+
+				csvChan <- csvData
+			}()
+
+			// Currently creates an OperatorGroup for every Subscription
+			// in the same ns, and defaults to targeting all ns.
+			// Future implementations will enable targeting ns based on
+			// installModes supported by the CSV. Also, only one OperatorGroup
+			// should exist in each ns
+
+			// if policy contains no operatorgroup spec, check if there is allnamespaces
+			// if not, create one
+
+			if policy.Spec.OperatorGroup != nil {
+				operatorGroup := buildOperatorGroup(policy)
+				if operatorGroup != nil {
+					err = r.Create(context.TODO(), operatorGroup)
+				}
+			} else {
+				ogSpec := new(operatorv1.OperatorGroup)
+				err := r.Get(context.TODO(),
+					types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: "all-ns-og"}, ogSpec)
+				exists = !errors.IsNotFound(err)
+
+				if !exists {
+					gvk := schema.GroupVersionKind{
+						Group:   "operators.coreos.com",
+						Version: "v1",
+						Kind:    "OperatorGroup",
+					}
+
+					ogSpec.SetGroupVersionKind(gvk)
+					ogSpec.ObjectMeta.SetName("all-ns-og")
+					ogSpec.ObjectMeta.SetNamespace(subscriptionSpec.Namespace)
+
+					err = r.Create(context.TODO(), ogSpec)
+				}
+			}
+
+			if err != nil {
+				r.setCompliance(policy, policyv1.NonCompliant)
+				OpLog.Error(err, "Could not handle missing musthave object")
+
+				return reconcile.Result{}, err
+			}
+
+			csvs := <-csvChan
+
+			// list of csvs
+			for i := range csvs.Items {
+				deployment := csvs.Items[i]
+				_ = deployment
+			}
+
+			r.setCompliance(policy, policyv1.Compliant)
+
+			return reconcile.Result{}, nil
+		}
+	}
+
+	err = r.DynamicWatcher.EndQueryBatch(watcher)
+	if err != nil {
+		panic(err)
+	}
+
 	err = r.handleSinglePolicy(policy)
 	if err != nil {
 		OpLog.Error(err, "Error while evaluating operator policy")
@@ -105,48 +204,10 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return reconcile.Result{}, nil
 }
 
-// PeriodicallyExecOperatorPolicies loops through all operatorpolicies in the target namespace and triggers
-// template handling for each one. This function drives all the work the operator policy controller does.
-func (r *OperatorPolicyReconciler) PeriodicallyExecOperatorPolicies(freq uint, elected <-chan struct{},
-) {
-	OpLog.Info("Waiting for leader election before periodically evaluating operator policies")
-	<-elected
-
-	exiting := false
-	for !exiting {
-		start := time.Now()
-
-		var skipLoop bool
-		if !skipLoop {
-			policiesList := policyv1beta1.OperatorPolicyList{}
-
-			err := r.List(context.TODO(), &policiesList)
-			if err != nil {
-				OpLog.Error(err, "Failed to list the OperatorPolicy objects to evaluate")
-			} else {
-				for i := range policiesList.Items {
-					policy := policiesList.Items[i]
-					if !r.shouldEvaluatePolicy(&policy) {
-						continue
-					}
-
-					// handle policy
-					err := r.handleSinglePolicy(&policy)
-					if err != nil {
-						OpLog.Error(err, "Error while evaluating operator policy")
-					}
-				}
-			}
-		}
-
-		elapsed := time.Since(start).Seconds()
-		if float64(freq) > elapsed {
-			remainingSleep := float64(freq) - elapsed
-			sleepTime := time.Duration(remainingSleep) * time.Second
-			OpLog.V(2).Info("Sleeping before reprocessing the operator policies", "seconds", sleepTime)
-			time.Sleep(sleepTime)
-		}
-	}
+func (r *OperatorPolicyReconciler) getOperatorPolicyDependencies(
+	policy *policyv1beta1.OperatorPolicy,
+) error {
+	return nil
 }
 
 // handleSinglePolicy encapsulates the logic for processing a single operatorPolicy.
@@ -235,6 +296,7 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 
 			csvs := <-csvChan
 
+			// list of csvs
 			for i := range csvs.Items {
 				deployment := csvs.Items[i]
 				_ = deployment
