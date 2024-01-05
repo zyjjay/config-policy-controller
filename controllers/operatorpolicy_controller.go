@@ -246,16 +246,6 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 				return err
 			}
 
-			csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
-
-			go func() {
-				defer close(csvChan)
-				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
-				err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
-
-				csvChan <- csvData
-			}()
-
 			// Currently creates an OperatorGroup for every Subscription
 			// in the same ns, and defaults to targeting all ns.
 			// Future implementations will enable targeting ns based on
@@ -298,12 +288,56 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 				return err
 			}
 
+			csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
+
+			go func() {
+				defer close(csvChan)
+				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
+				err = r.busyWaitForCSV(20*time.Second, csvData, subscriptionSpec)
+
+				csvChan <- csvData
+			}()
+
 			csvs := <-csvChan
 
 			// list of csvs
+			// Retrieve installed CSV name
+			// csvName = r.Get(context.TODO(),
+			// 	types.NamespacedName{Name: policy.Spec.Subscription.Package, Namespace: policy.Spec.Subscription.Namespace},
+			// 	subscriptionSpec)
+
+			// Create watcher object
+			watcher := depclient.ObjectIdentifier{
+				Group:     "policy.open-cluster-management.io",
+				Version:   "v1beta1",
+				Kind:      "OperatorPolicy",
+				Name:      policy.Name,
+				Namespace: policy.Namespace,
+			}
+
+			// Add watches
+			err = r.DynamicWatcher.StartQueryBatch(watcher)
+			if err != nil {
+				panic(err)
+			}
+
+			gvk := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+			err = r.Get(context.TODO(),
+				types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
+				subscriptionSpec)
 			for i := range csvs.Items {
 				deployment := csvs.Items[i]
-				_ = deployment
+				if deployment.Name == subscriptionSpec.Status.InstalledCSV {
+					_, err := r.DynamicWatcher.Get(watcher, gvk, deployment.Namespace, deployment.Name)
+					if err != nil {
+						panic(err)
+					}
+				}
+			}
+
+			err = r.DynamicWatcher.EndQueryBatch(watcher)
+			if err != nil {
+				panic(err)
 			}
 
 			r.setCompliance(policy, policyv1.Compliant)

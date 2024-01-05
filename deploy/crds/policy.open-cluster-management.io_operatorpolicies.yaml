@@ -70,7 +70,7 @@ spec:
                     description: Target namespaces of the referent
                     oneOf:
                     - required:
-                      - namespace
+                      - namespaces
                     - required:
                       - selector
                     properties:
