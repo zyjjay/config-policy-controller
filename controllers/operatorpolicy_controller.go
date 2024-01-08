@@ -96,103 +96,103 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// handle the policy
 	OpLog.Info("Reconciling OperatorPolicy", "policy", policy.Name)
 
-	err = r.DynamicWatcher.StartQueryBatch(watcher)
-	if err != nil {
-		panic(err)
-	}
+	// err = r.DynamicWatcher.StartQueryBatch(watcher)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
-	// check for subscription
-	subscriptionSpec := new(operatorv1alpha1.Subscription)
-	err = r.Get(context.TODO(),
-		types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
-		subscriptionSpec)
-	exists := err == nil || !errors.IsNotFound(err)
-	shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
+	// // check for subscription
+	// subscriptionSpec := new(operatorv1alpha1.Subscription)
+	// err = r.Get(context.TODO(),
+	// 	types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
+	// 	subscriptionSpec)
+	// exists := err == nil || !errors.IsNotFound(err)
+	// shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
 
-	// Subscription does not exist but it should exist
-	if !exists && shouldExist {
-		if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
-			OpLog.Info("creating kind " + subscriptionSpec.Kind + " in ns " + subscriptionSpec.Namespace)
-			subscriptionSpec := buildSubscription(policy, subscriptionSpec)
-			err = r.Create(context.TODO(), subscriptionSpec)
+	// // Subscription does not exist but it should exist
+	// if !exists && shouldExist {
+	// 	if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
+	// 		OpLog.Info("creating kind " + subscriptionSpec.Kind + " in ns " + subscriptionSpec.Namespace)
+	// 		subscriptionSpec := buildSubscription(policy, subscriptionSpec)
+	// 		err = r.Create(context.TODO(), subscriptionSpec)
 
-			if err != nil {
-				r.setCompliance(policy, policyv1.NonCompliant)
-				OpLog.Error(err, "Could not handle missing musthave object")
+	// 		if err != nil {
+	// 			r.setCompliance(policy, policyv1.NonCompliant)
+	// 			OpLog.Error(err, "Could not handle missing musthave object")
 
-				return reconcile.Result{}, err
-			}
+	// 			return reconcile.Result{}, err
+	// 		}
 
-			csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
+	// 		csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
 
-			go func() {
-				defer close(csvChan)
-				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
-				err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
+	// 		go func() {
+	// 			defer close(csvChan)
+	// 			csvData := &operatorv1alpha1.ClusterServiceVersionList{}
+	// 			err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
 
-				csvChan <- csvData
-			}()
+	// 			csvChan <- csvData
+	// 		}()
 
-			// Currently creates an OperatorGroup for every Subscription
-			// in the same ns, and defaults to targeting all ns.
-			// Future implementations will enable targeting ns based on
-			// installModes supported by the CSV. Also, only one OperatorGroup
-			// should exist in each ns
+	// 		// Currently creates an OperatorGroup for every Subscription
+	// 		// in the same ns, and defaults to targeting all ns.
+	// 		// Future implementations will enable targeting ns based on
+	// 		// installModes supported by the CSV. Also, only one OperatorGroup
+	// 		// should exist in each ns
 
-			// if policy contains no operatorgroup spec, check if there is allnamespaces
-			// if not, create one
+	// 		// if policy contains no operatorgroup spec, check if there is allnamespaces
+	// 		// if not, create one
 
-			if policy.Spec.OperatorGroup != nil {
-				operatorGroup := buildOperatorGroup(policy)
-				if operatorGroup != nil {
-					err = r.Create(context.TODO(), operatorGroup)
-				}
-			} else {
-				ogSpec := new(operatorv1.OperatorGroup)
-				err := r.Get(context.TODO(),
-					types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: "all-ns-og"}, ogSpec)
-				exists = !errors.IsNotFound(err)
+	// 		if policy.Spec.OperatorGroup != nil {
+	// 			operatorGroup := buildOperatorGroup(policy)
+	// 			if operatorGroup != nil {
+	// 				err = r.Create(context.TODO(), operatorGroup)
+	// 			}
+	// 		} else {
+	// 			ogSpec := new(operatorv1.OperatorGroup)
+	// 			err := r.Get(context.TODO(),
+	// 				types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: "all-ns-og"}, ogSpec)
+	// 			exists = !errors.IsNotFound(err)
 
-				if !exists {
-					gvk := schema.GroupVersionKind{
-						Group:   "operators.coreos.com",
-						Version: "v1",
-						Kind:    "OperatorGroup",
-					}
+	// 			if !exists {
+	// 				gvk := schema.GroupVersionKind{
+	// 					Group:   "operators.coreos.com",
+	// 					Version: "v1",
+	// 					Kind:    "OperatorGroup",
+	// 				}
 
-					ogSpec.SetGroupVersionKind(gvk)
-					ogSpec.ObjectMeta.SetName("all-ns-og")
-					ogSpec.ObjectMeta.SetNamespace(subscriptionSpec.Namespace)
+	// 				ogSpec.SetGroupVersionKind(gvk)
+	// 				ogSpec.ObjectMeta.SetName("all-ns-og")
+	// 				ogSpec.ObjectMeta.SetNamespace(subscriptionSpec.Namespace)
 
-					err = r.Create(context.TODO(), ogSpec)
-				}
-			}
+	// 				err = r.Create(context.TODO(), ogSpec)
+	// 			}
+	// 		}
 
-			if err != nil {
-				r.setCompliance(policy, policyv1.NonCompliant)
-				OpLog.Error(err, "Could not handle missing musthave object")
+	// 		if err != nil {
+	// 			r.setCompliance(policy, policyv1.NonCompliant)
+	// 			OpLog.Error(err, "Could not handle missing musthave object")
 
-				return reconcile.Result{}, err
-			}
+	// 			return reconcile.Result{}, err
+	// 		}
 
-			csvs := <-csvChan
+	// 		csvs := <-csvChan
 
-			// list of csvs
-			for i := range csvs.Items {
-				deployment := csvs.Items[i]
-				_ = deployment
-			}
+	// 		// list of csvs
+	// 		for i := range csvs.Items {
+	// 			deployment := csvs.Items[i]
+	// 			_ = deployment
+	// 		}
 
-			r.setCompliance(policy, policyv1.Compliant)
+	// 		r.setCompliance(policy, policyv1.Compliant)
 
-			return reconcile.Result{}, nil
-		}
-	}
+	// 		return reconcile.Result{}, nil
+	// 	}
+	// }
 
-	err = r.DynamicWatcher.EndQueryBatch(watcher)
-	if err != nil {
-		panic(err)
-	}
+	// err = r.DynamicWatcher.EndQueryBatch(watcher)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	err = r.handleSinglePolicy(policy)
 	if err != nil {

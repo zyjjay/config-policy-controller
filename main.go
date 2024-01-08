@@ -421,11 +421,6 @@ func main() {
 			os.Exit(1)
 		}
 
-		OpReconciler := controllers.OperatorPolicyReconciler{
-			Client:         mgr.GetClient(),
-			DynamicWatcher: watcher,
-		}
-
 		go func() {
 			err := watcher.Start(managerCtx)
 			if err != nil {
@@ -435,6 +430,11 @@ func main() {
 
 		// Wait until the dynamic watcher has started.
 		<-watcher.Started()
+
+		OpReconciler := controllers.OperatorPolicyReconciler{
+			Client:         mgr.GetClient(),
+			DynamicWatcher: watcher,
+		}
 
 		if err = OpReconciler.SetupWithManager(mgr, depEvents); err != nil {
 			log.Error(err, "Unable to create controller", "controller", "OperatorPolicy")
