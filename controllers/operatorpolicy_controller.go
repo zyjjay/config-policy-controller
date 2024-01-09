@@ -96,20 +96,43 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// handle the policy
 	OpLog.Info("Reconciling OperatorPolicy", "policy", policy.Name)
 
+	subscriptionSpec := new(operatorv1alpha1.Subscription)
+	err = r.Get(context.TODO(),
+		types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
+		subscriptionSpec)
+	exists := err == nil || !errors.IsNotFound(err)
+	shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
+
 	// TODO: Case 1: policy has just been applied and related resources have yet to be created
 
-	err = r.handleSinglePolicy(policy)
-	if err != nil {
-		OpLog.Error(err, "Error while evaluating operator policy")
+	if !exists && shouldExist {
+		err = r.handleSinglePolicy(policy, subscriptionSpec)
+		if err != nil {
+			OpLog.Error(err, "Error while evaluating operator policy")
 
-		return reconcile.Result{}, err
+			return reconcile.Result{}, err
+		}
 	}
 
 	// TODO: Case 2: Resources exist, but should not exist (i.e. mustnothave or deletion)
+	if exists && !shouldExist {
+		OpLog.Info("The object exists but should not exist")
+		// Future implementation: clean up resources and delete watches if mustnothave, otherwise inform
+	}
 
 	// TODO: Case 3: Resources do not exist, and should not exist
 
+	if !exists && !shouldExist {
+		OpLog.Info("The object does not exist and is compliant with the mustnothave compliance type")
+		// Future implementation: Possibly emit a success event
+	}
+
 	// TODO: Case 4: Resources exist, and should exist (i.e. update)
+
+	if exists && shouldExist {
+		OpLog.Info("The object already exists. Checking fields to verify matching specs")
+		// Future implementation: Verify the specs of the object matches the one on the cluster
+	}
 
 	return reconcile.Result{}, nil
 }
@@ -128,175 +151,121 @@ func (r *OperatorPolicyReconciler) getOperatorPolicyDependencies(
 // https://github.com/JustinKuli/ocm-enhancements/blob/89-operator-policy/enhancements/sig-policy/89-operator-policy-kind/README.md
 func (r *OperatorPolicyReconciler) handleSinglePolicy(
 	policy *policyv1beta1.OperatorPolicy,
+	subscription *operatorv1alpha1.Subscription,
 ) error {
-	OpLog.Info("Handling OperatorPolicy", "policy", policy.Name)
-
-	subscriptionSpec := new(operatorv1alpha1.Subscription)
-	err := r.Get(context.TODO(),
-		types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
-		subscriptionSpec)
-	exists := err == nil || !errors.IsNotFound(err)
-	shouldExist := strings.EqualFold(string(policy.Spec.ComplianceType), string(policyv1.MustHave))
 
 	// Object does not exist but it should exist, create object
 	// Create new watches on subscription, CSV/Deployments(?), InstallPlan, operatorgroup(?), catalogsources
 	// Does CSV contain info regarding updates?
 	// Most likely, just need to watch the deployments that is created for the operator installation
 	// Should include all resources that contributes to the status field of the operator policy (check docs)
-	if !exists && shouldExist {
-		if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
-			OpLog.Info("creating kind " + subscriptionSpec.Kind + " in ns " + subscriptionSpec.Namespace)
-			subscriptionSpec := buildSubscription(policy, subscriptionSpec)
-			err = r.Create(context.TODO(), subscriptionSpec)
+	if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
+		OpLog.Info("creating kind " + subscription.Kind + " in ns " + subscription.Namespace)
+		subscriptionSpec := buildSubscription(policy, subscription)
+		err := r.Create(context.TODO(), subscriptionSpec)
 
-			if err != nil {
-				r.setCompliance(policy, policyv1.NonCompliant)
-				OpLog.Error(err, "Could not handle missing musthave object")
+		if err != nil {
+			r.setCompliance(policy, policyv1.NonCompliant)
+			OpLog.Error(err, "Could not handle missing musthave object")
 
-				return err
+			return err
+		}
+
+		// Currently creates an OperatorGroup for every Subscription
+		// in the same ns, and defaults to targeting all ns.
+		// Future implementations will enable targeting ns based on
+		// installModes supported by the CSV. Also, only one OperatorGroup
+		// should exist in each ns
+
+		// if policy contains no operatorgroup spec, check if there is allnamespaces
+		// if not, create one
+
+		if policy.Spec.OperatorGroup != nil {
+			operatorGroup := buildOperatorGroup(policy)
+			if operatorGroup != nil {
+				err = r.Create(context.TODO(), operatorGroup)
 			}
+		} else {
+			ogSpec := new(operatorv1.OperatorGroup)
+			err := r.Get(context.TODO(),
+				types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: "all-ns-og"}, ogSpec)
+			exists := !errors.IsNotFound(err)
 
-			// Currently creates an OperatorGroup for every Subscription
-			// in the same ns, and defaults to targeting all ns.
-			// Future implementations will enable targeting ns based on
-			// installModes supported by the CSV. Also, only one OperatorGroup
-			// should exist in each ns
-
-			// if policy contains no operatorgroup spec, check if there is allnamespaces
-			// if not, create one
-
-			if policy.Spec.OperatorGroup != nil {
-				operatorGroup := buildOperatorGroup(policy)
-				if operatorGroup != nil {
-					err = r.Create(context.TODO(), operatorGroup)
+			if !exists {
+				gvk := schema.GroupVersionKind{
+					Group:   "operators.coreos.com",
+					Version: "v1",
+					Kind:    "OperatorGroup",
 				}
-			} else {
-				ogSpec := new(operatorv1.OperatorGroup)
-				err := r.Get(context.TODO(),
-					types.NamespacedName{Namespace: subscriptionSpec.Namespace, Name: "all-ns-og"}, ogSpec)
-				exists = !errors.IsNotFound(err)
 
-				if !exists {
-					gvk := schema.GroupVersionKind{
-						Group:   "operators.coreos.com",
-						Version: "v1",
-						Kind:    "OperatorGroup",
-					}
+				ogSpec.SetGroupVersionKind(gvk)
+				ogSpec.ObjectMeta.SetName("all-ns-og")
+				ogSpec.ObjectMeta.SetNamespace(subscriptionSpec.Namespace)
 
-					ogSpec.SetGroupVersionKind(gvk)
-					ogSpec.ObjectMeta.SetName("all-ns-og")
-					ogSpec.ObjectMeta.SetNamespace(subscriptionSpec.Namespace)
-
-					err = r.Create(context.TODO(), ogSpec)
-				}
+				err = r.Create(context.TODO(), ogSpec)
 			}
+		}
 
-			if err != nil {
-				r.setCompliance(policy, policyv1.NonCompliant)
-				OpLog.Error(err, "Could not handle missing musthave object")
+		if err != nil {
+			r.setCompliance(policy, policyv1.NonCompliant)
+			OpLog.Error(err, "Could not handle missing musthave object")
 
-				return err
-			}
+			return err
+		}
 
-			csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
+		csvChan := make(chan *operatorv1alpha1.ClusterServiceVersionList)
 
-			go func() {
-				defer close(csvChan)
-				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
-				err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
+		go func() {
+			defer close(csvChan)
+			csvData := &operatorv1alpha1.ClusterServiceVersionList{}
+			err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
 
-				csvChan <- csvData
-			}()
+			csvChan <- csvData
+		}()
 
-			csvs := <-csvChan
+		csvs := <-csvChan
 
-			// Create watcher object
-			watcher := depclient.ObjectIdentifier{
-				Group:     "policy.open-cluster-management.io",
-				Version:   "v1beta1",
-				Kind:      "OperatorPolicy",
-				Name:      policy.Name,
-				Namespace: policy.Namespace,
-			}
+		// Create watcher object
+		watcher := depclient.ObjectIdentifier{
+			Group:     "policy.open-cluster-management.io",
+			Version:   "v1beta1",
+			Kind:      "OperatorPolicy",
+			Name:      policy.Name,
+			Namespace: policy.Namespace,
+		}
 
-			// Add watches
-			err = r.DynamicWatcher.StartQueryBatch(watcher)
-			if err != nil {
-				panic(err)
-			}
+		// Add watches
+		err = r.DynamicWatcher.StartQueryBatch(watcher)
+		if err != nil {
+			panic(err)
+		}
 
-			gvk := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
-			err = r.Get(context.TODO(),
-				types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
-				subscriptionSpec)
-			for _, csv := range csvs.Items {
-				if csv.Name == subscriptionSpec.Status.InstalledCSV {
-					for _, deploymentSpec := range csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs {
-						_, err := r.DynamicWatcher.Get(watcher, gvk, csv.Namespace, deploymentSpec.Name)
-						if err != nil {
-							panic(err)
-						}
+		gvk := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+		err = r.Get(context.TODO(),
+			types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
+			subscriptionSpec)
+		for _, csv := range csvs.Items {
+			if csv.Name == subscriptionSpec.Status.InstalledCSV {
+				for _, deploymentSpec := range csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs {
+					_, err := r.DynamicWatcher.Get(watcher, gvk, csv.Namespace, deploymentSpec.Name)
+					if err != nil {
+						panic(err)
 					}
 				}
 			}
-
-			err = r.DynamicWatcher.EndQueryBatch(watcher)
-			if err != nil {
-				panic(err)
-			}
-
-			r.setCompliance(policy, policyv1.Compliant)
-
-			return nil
 		}
 
-		// Inform
-		r.setCompliance(policy, policyv1.NonCompliant)
-
-		return nil
-	}
-
-	// Object exists but it should not exist, delete object
-	// Deleting related objects will be added in the future
-	if exists && !shouldExist {
-		if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
-			OpLog.Info("deleting kind " + subscriptionSpec.Kind + " in ns " + subscriptionSpec.Namespace)
-			err = r.Delete(context.TODO(), subscriptionSpec)
-
-			if err != nil {
-				r.setCompliance(policy, policyv1.NonCompliant)
-				OpLog.Error(err, "Could not handle existing musthave object")
-
-				return err
-			}
-
-			r.setCompliance(policy, policyv1.Compliant)
-
-			return nil
+		err = r.DynamicWatcher.EndQueryBatch(watcher)
+		if err != nil {
+			panic(err)
 		}
 
-		// Inform
-		r.setCompliance(policy, policyv1.NonCompliant)
+		r.setCompliance(policy, policyv1.Compliant)
 
 		return nil
 	}
 
-	// Object does not exist and it should not exist, emit success event
-	if !exists && !shouldExist {
-		OpLog.Info("The object does not exist and is compliant with the mustnothave compliance type")
-		// Future implementation: Possibly emit a success event
-
-		return nil
-	}
-
-	// Object exists, now need to validate field to make sure they match
-	if exists {
-		OpLog.Info("The object already exists. Checking fields to verify matching specs")
-		// Future implementation: Verify the specs of the object matches the one on the cluster
-
-		return nil
-	}
-
+	// inform
 	return nil
 }
 
