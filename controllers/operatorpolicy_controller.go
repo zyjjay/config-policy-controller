@@ -106,7 +106,7 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// TODO: Case 1: policy has just been applied and related resources have yet to be created
 
 	if !exists && shouldExist {
-		err = r.handleSinglePolicy(policy, subscriptionSpec)
+		err = r.createPolicyResources(policy, subscriptionSpec)
 		if err != nil {
 			OpLog.Error(err, "Error while evaluating operator policy")
 
@@ -143,22 +143,14 @@ func (r *OperatorPolicyReconciler) getOperatorPolicyDependencies(
 	return nil
 }
 
-// handleSinglePolicy encapsulates the logic for processing a single operatorPolicy.
-// Currently, the controller is able to create an OLM Subscription from the operatorPolicy specs,
-// create an OperatorGroup in the ns as the Subscription, set the compliance status, and log the policy.
-//
-// In the future, more reconciliation logic will be added. For reference:
-// https://github.com/JustinKuli/ocm-enhancements/blob/89-operator-policy/enhancements/sig-policy/89-operator-policy-kind/README.md
-func (r *OperatorPolicyReconciler) handleSinglePolicy(
+// createPolicyResources encapsulates the logic for creating resources specified within an operator policy.
+// This should normally happen when the policy is initially applied to the cluster. Creates an OperatorGroup
+// if specified, otherwise defaults to using an allnamespaces OperatorGroup.
+func (r *OperatorPolicyReconciler) createPolicyResources(
 	policy *policyv1beta1.OperatorPolicy,
 	subscription *operatorv1alpha1.Subscription,
 ) error {
 
-	// Object does not exist but it should exist, create object
-	// Create new watches on subscription, CSV/Deployments(?), InstallPlan, operatorgroup(?), catalogsources
-	// Does CSV contain info regarding updates?
-	// Most likely, just need to watch the deployments that is created for the operator installation
-	// Should include all resources that contributes to the status field of the operator policy (check docs)
 	if strings.EqualFold(string(policy.Spec.RemediationAction), string(policyv1.Enforce)) {
 		OpLog.Info("creating kind " + subscription.Kind + " in ns " + subscription.Namespace)
 		subscriptionSpec := buildSubscription(policy, subscription)
