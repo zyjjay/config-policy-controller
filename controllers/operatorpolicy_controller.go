@@ -293,18 +293,12 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 			go func() {
 				defer close(csvChan)
 				csvData := &operatorv1alpha1.ClusterServiceVersionList{}
-				err = r.busyWaitForCSV(20*time.Second, csvData, subscriptionSpec)
+				err = r.busyWaitForCSV(30*time.Second, csvData, subscriptionSpec)
 
 				csvChan <- csvData
 			}()
 
 			csvs := <-csvChan
-
-			// list of csvs
-			// Retrieve installed CSV name
-			// csvName = r.Get(context.TODO(),
-			// 	types.NamespacedName{Name: policy.Spec.Subscription.Package, Namespace: policy.Spec.Subscription.Namespace},
-			// 	subscriptionSpec)
 
 			// Create watcher object
 			watcher := depclient.ObjectIdentifier{
@@ -325,12 +319,13 @@ func (r *OperatorPolicyReconciler) handleSinglePolicy(
 			err = r.Get(context.TODO(),
 				types.NamespacedName{Namespace: policy.Spec.Subscription.Namespace, Name: policy.Spec.Subscription.SubscriptionSpec.Package},
 				subscriptionSpec)
-			for i := range csvs.Items {
-				deployment := csvs.Items[i]
-				if deployment.Name == subscriptionSpec.Status.InstalledCSV {
-					_, err := r.DynamicWatcher.Get(watcher, gvk, deployment.Namespace, deployment.Name)
-					if err != nil {
-						panic(err)
+			for _, csv := range csvs.Items {
+				if csv.Name == subscriptionSpec.Status.InstalledCSV {
+					for _, deploymentSpec := range csv.Spec.InstallStrategy.StrategySpec.DeploymentSpecs {
+						_, err := r.DynamicWatcher.Get(watcher, gvk, csv.Namespace, deploymentSpec.Name)
+						if err != nil {
+							panic(err)
+						}
 					}
 				}
 			}
