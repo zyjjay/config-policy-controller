@@ -200,6 +200,17 @@ func calculateComplianceCondition(policy *policyv1beta1.OperatorPolicy) metav1.C
 	}
 
 	// FUTURE: check additional conditions
+	idx, cond = policy.Status.GetCondition(catalogSrcConditionType)
+	if idx == -1 {
+		messages = append(messages, "the status of the CatalogSource is unknown")
+		foundNonCompliant = true
+	} else {
+		messages = append(messages, cond.Message)
+
+		if cond.Status != metav1.ConditionFalse {
+			foundNonCompliant = true
+		}
+	}
 
 	if foundNonCompliant {
 		return metav1.Condition{
@@ -274,9 +285,10 @@ func (r *OperatorPolicyReconciler) emitComplianceEvent(
 }
 
 const (
-	compliantConditionType = "Compliant"
-	opGroupConditionType   = "OperatorGroupCompliant"
-	subConditionType       = "SubscriptionCompliant"
+	compliantConditionType  = "Compliant"
+	opGroupConditionType    = "OperatorGroupCompliant"
+	subConditionType        = "SubscriptionCompliant"
+	catalogSrcConditionType = "CatalogSourcesUnhealthy"
 )
 
 func condType(kind string) string {
@@ -371,6 +383,51 @@ var opGroupTooManyCond = metav1.Condition{
 	Status:  metav1.ConditionFalse,
 	Reason:  "TooManyOperatorGroups",
 	Message: "there is more than one OperatorGroup in the namespace",
+}
+
+// catalogSourceFindCond is a conditionally compliant condition with reason
+// based on the `isMissing` parameter
+func catalogSourceFindCond(isMissing bool) metav1.Condition {
+	status := metav1.ConditionFalse
+	reason := "CatalogSourcesFound"
+	message := "CatalogSource was found"
+
+	if isMissing {
+		status = metav1.ConditionTrue
+		reason = "CatalogSourcesNotFound"
+		message = "CatalogSource was not found"
+	}
+
+	return metav1.Condition{
+		Type:    "CatalogSourcesUnhealthy",
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	}
+}
+
+// catalogSourceObj returns a conditionally compliant RelatedObject with reason based on the `isMissing` parameter
+func catalogSourceObj(catalogName string, catalogNS string, isMissing bool) policyv1.RelatedObject {
+	compliance := string(policyv1.NonCompliant)
+	reason := reasonWantFoundDNE
+
+	if !isMissing {
+		compliance = string(policyv1.Compliant)
+		reason = reasonWantFoundExists
+	}
+
+	return policyv1.RelatedObject{
+		Object: policyv1.ObjectResource{
+			Kind:       "CatalogSource",
+			APIVersion: "operators.coreos.com/v1alpha1",
+			Metadata: policyv1.ObjectMetadata{
+				Name:      catalogName,
+				Namespace: catalogNS,
+			},
+		},
+		Compliant: compliance,
+		Reason:    reason,
+	}
 }
 
 // missingWantedObj returns a NonCompliant RelatedObject with reason = 'Resource not found but should exist'

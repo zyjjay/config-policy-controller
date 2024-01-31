@@ -3,32 +3,20 @@ kind: OperatorPolicy
 metadata:
   name: test-operator-policy
 spec:
-  remediationAction: enforce # or inform
+  remediationAction: inform # or inform
   severity: medium
   complianceType: musthave # or mustnothave
   operatorGroup: # optional
     name: og-single
-    namespace: op-1
+    namespace: default
     target:
       namespaces:
-        - op-1
+        - default
   subscription:
     channel: stable-3.8
     name: project-quay
-    namespace: op-1
+    namespace: default
     installPlanApproval: Automatic # may be overridden to Manual by other settings
     source: operatorhubio-catalog
     sourceNamespace: olm
     startingCSV: quay-operator.v3.8.1
-  removalBehavior:
-    operatorGroups: DeleteIfUnused
-    subscriptions: Delete
-    clusterServiceVersions: Delete
-    installPlans: Keep
-    customResourceDefinitions: Keep
-    apiServiceDefinitions: Keep
-  statusConfig:
-    catalogSourceUnhealthy: StatusMessageOnly
-    deploymentsUnavailable: NonCompliant
-    upgradesAvailable: StatusMessageOnly
-    upgradesProgressing: NonCompliant

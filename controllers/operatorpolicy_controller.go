@@ -36,8 +36,21 @@ const (
 )
 
 var (
-	subscriptionGVK  = schema.GroupVersionKind{Group: "operators.coreos.com", Version: "v1alpha1", Kind: "Subscription"}
-	operatorGroupGVK = schema.GroupVersionKind{Group: "operators.coreos.com", Version: "v1", Kind: "OperatorGroup"}
+	subscriptionGVK = schema.GroupVersionKind{
+		Group:   "operators.coreos.com",
+		Version: "v1alpha1",
+		Kind:    "Subscription",
+	}
+	operatorGroupGVK = schema.GroupVersionKind{
+		Group:   "operators.coreos.com",
+		Version: "v1",
+		Kind:    "OperatorGroup",
+	}
+	catalogSrcGVK = schema.GroupVersionKind{
+		Group:   "operators.coreos.com",
+		Version: "v1alpha1",
+		Kind:    "CatalogSource",
+	}
 )
 
 // OperatorPolicyReconciler reconciles a OperatorPolicy object
@@ -125,7 +138,7 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return reconcile.Result{}, err
 	}
 
-	_, err = r.handleSubscription(ctx, policy)
+	subscription, err := r.handleSubscription(ctx, policy)
 	if err != nil {
 		OpLog.Error(err, "Error handling Subscription")
 
@@ -134,7 +147,72 @@ func (r *OperatorPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// FUTURE: more resource checks
 
+	// handle catalogsource
+	if err := r.handleCatalogSource(ctx, policy, subscription); err != nil {
+		OpLog.Error(err, "Error handling CatalogSource")
+
+		return reconcile.Result{}, err
+	}
+
 	return reconcile.Result{}, nil
+}
+
+func (r *OperatorPolicyReconciler) handleCatalogSource(
+	ctx context.Context,
+	policy *policyv1beta1.OperatorPolicy,
+	subscription *operatorv1alpha1.Subscription,
+) error {
+	watcher := opPolIdentifier(policy.Namespace, policy.Name)
+
+	catalogName := subscription.Spec.CatalogSource
+	catalogNS := subscription.Spec.CatalogSourceNamespace
+
+	if len(subscription.Status.Conditions) == 0 {
+		// Subscription not found, check the CatalogSource object
+		foundCatalogSrc, err := r.DynamicWatcher.Get(watcher, catalogSrcGVK,
+			catalogNS, catalogName)
+		if err != nil {
+			return fmt.Errorf("error getting CatalogSource: %w", err)
+		}
+
+		// Conditionally emit health event using the defined status template
+		isMissing := foundCatalogSrc == nil
+
+		err = r.updateStatus(ctx, policy, catalogSourceFindCond(isMissing),
+			catalogSourceObj(catalogName, catalogNS, isMissing))
+		if err != nil {
+			return fmt.Errorf("error updating the status for CatalogSource when Subscription DNE on cluster: %w", err)
+		}
+
+		return nil
+	}
+
+	// Iterate over all the conditions to determine the state of the CatalogSource
+	for _, condition := range subscription.Status.Conditions {
+		if condition.Type == catalogSrcConditionType {
+			status := metav1.ConditionFalse
+			if string(condition.Status) == string(metav1.ConditionTrue) {
+				status = metav1.ConditionTrue
+			}
+
+			isMissing := string(condition.Status) == string(metav1.ConditionTrue)
+
+			healthCondition := metav1.Condition{
+				Type:               string(condition.Type),
+				Status:             status,
+				LastTransitionTime: *condition.LastTransitionTime,
+				Reason:             condition.Reason,
+				Message:            condition.Message,
+			}
+
+			err := r.updateStatus(ctx, policy, healthCondition, catalogSourceObj(catalogName, catalogNS, isMissing))
+			if err != nil {
+				return fmt.Errorf("error updating the status for a missing CatalogSource: %w", err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (r *OperatorPolicyReconciler) handleOpGroup(ctx context.Context, policy *policyv1beta1.OperatorPolicy) error {
@@ -422,7 +500,7 @@ func (r *OperatorPolicyReconciler) handleSubscription(
 		// For now, just mark it as compliant
 		err := r.updateStatus(ctx, policy, matchesCond("Subscription"), matchedObj(foundSub))
 		if err != nil {
-			return nil, fmt.Errorf("error updating the status for an OperatorGroup that matches: %w", err)
+			return nil, fmt.Errorf("error updating the status for a Subscription that matches: %w", err)
 		}
 
 		return mergedSub, nil

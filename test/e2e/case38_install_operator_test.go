@@ -550,4 +550,110 @@ var _ = Describe("Test installing an operator from OperatorPolicy", Ordered, fun
 			)
 		})
 	})
+	Describe("Test status reporting for catalogsource", Ordered, func() {
+		const (
+			OpPlcYAML = "../resources/case38_operator_install/operator-policy-with-group.yaml"
+			OpPlcName = "oppol-with-group"
+			subName   = "project-quay"
+		)
+
+		BeforeAll(func() {
+			By("Applying creating a ns and the test policy")
+			utils.Kubectl("create", "ns", opPolTestNS)
+			DeferCleanup(func() {
+				utils.Kubectl("delete", "ns", opPolTestNS)
+			})
+
+			createObjWithParent(parentPolicyYAML, parentPolicyName,
+				OpPlcYAML, opPolTestNS, gvrPolicy, gvrOperatorPolicy)
+		})
+
+		It("Should initially be Compliant", func() {
+			check(
+				OpPlcName,
+				false,
+				[]policyv1.RelatedObject{{
+					Object: policyv1.ObjectResource{
+						Kind:       "CatalogSource",
+						APIVersion: "operators.coreos.com/v1alpha1",
+						Metadata: policyv1.ObjectMetadata{
+							Name:      "operatorhubio-catalog",
+							Namespace: opPolTestNS,
+						},
+					},
+					Compliant: "Compliant",
+					Reason:    "Resource found as expected",
+				}},
+				metav1.Condition{
+					Type:    "CatalogSourcesUnhealthy",
+					Status:  metav1.ConditionFalse,
+					Reason:  "CatalogSourcesFound",
+					Message: "CatalogSource was found",
+				},
+				"CatalogSource was found",
+			)
+		})
+
+		It("Should remain compliant when policy is enforced", func() {
+			By("Enforcing the policy")
+			utils.Kubectl("patch", "operatorpolicy", OpPlcName, "-n", opPolTestNS, "--type=json", "-p",
+				`[{"op": "replace", "path": "/spec/remediationAction", "value": "enforce"}]`)
+
+			By("Checking if the condition fields were inherited from the Subscription")
+			check(
+				OpPlcName,
+				false,
+				[]policyv1.RelatedObject{{
+					Object: policyv1.ObjectResource{
+						Kind:       "CatalogSource",
+						APIVersion: "operators.coreos.com/v1alpha1",
+						Metadata: policyv1.ObjectMetadata{
+							Name:      "operatorhubio-catalog",
+							Namespace: opPolTestNS,
+						},
+					},
+					Compliant: "Compliant",
+					Reason:    "Resource found as expected",
+				}},
+				metav1.Condition{
+					Type:    "CatalogSourcesUnhealthy",
+					Status:  metav1.ConditionFalse,
+					Reason:  "AllCatalogSourcesHealthy",
+					Message: "all available catalogsources are healthy",
+				},
+				"all available catalogsources are healthy",
+			)
+		})
+
+		It("Should become NonCompliant when CatalogSource fails", func() {
+			By("Patching the policy to reference a catalogSource that DNE to emulate failure")
+			utils.Kubectl("patch", "operatorpolicy", OpPlcName, "-n", opPolTestNS, "--type=json", "-p",
+				`[{"op": "replace", "path": "/spec/subscription/source", "value": "fakeName"}]`)
+
+			By("Checking the conditions and relatedObj in the policy")
+			check(
+				OpPlcName,
+				true,
+				[]policyv1.RelatedObject{{
+					Object: policyv1.ObjectResource{
+						Kind:       "CatalogSource",
+						APIVersion: "operators.coreos.com/v1alpha1",
+						Metadata: policyv1.ObjectMetadata{
+							Name:      "fakeName",
+							Namespace: opPolTestNS,
+						},
+					},
+					Compliant: "NonCompliant",
+					Reason:    "Resource not found but should exist",
+				}},
+				metav1.Condition{
+					Type:    "CatalogSourcesUnhealthy",
+					Status:  metav1.ConditionTrue,
+					Reason:  "UnhealthyCatalogSourceFound",
+					Message: "targeted catalogsource olm/fakeName missing",
+				},
+				"targeted catalogsource olm/fakeName missing",
+			)
+		})
+	})
 })
