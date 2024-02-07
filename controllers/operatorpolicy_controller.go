@@ -33,6 +33,7 @@ import (
 
 const (
 	OperatorControllerName string = "operator-policy-controller"
+	CatalogSourceReady string = "READY"
 )
 
 var (
@@ -179,51 +180,128 @@ func (r *OperatorPolicyReconciler) handleCatalogSource(
 		catalogName = subscription.Spec.CatalogSource
 		catalogNS = subscription.Spec.CatalogSourceNamespace
 	}
-
-	if subscription == nil || len(subscription.Status.Conditions) == 0 {
-		// Subscription not found, check the CatalogSource object
-		foundCatalogSrc, err := r.DynamicWatcher.Get(watcher, catalogSrcGVK,
-			catalogNS, catalogName)
-		if err != nil {
-			return fmt.Errorf("error getting CatalogSource: %w", err)
-		}
-
-		// Conditionally emit health event using the defined status template
-		isMissing := foundCatalogSrc == nil
-
-		err = r.updateStatus(ctx, policy, catalogSourceFindCond(isMissing),
-			catalogSourceObj(catalogName, catalogNS, isMissing))
-		if err != nil {
-			return fmt.Errorf("error updating the status for CatalogSource when Subscription DNE on cluster: %w", err)
-		}
-
-		return nil
+	
+	// Check if CatalogSource exists
+	foundCatalogSrc, err := r.DynamicWatcher.Get(watcher, catalogSrcGVK,
+		catalogNS, catalogName)
+	if err != nil {
+		return fmt.Errorf("error getting CatalogSource: %w", err)
 	}
+
+	// Conditionally emit health event using the defined status template
+	isMissing := foundCatalogSrc == nil
+	isUnhealthy := isMissing 
+
+	// if isMissing {
+		// CatalogSource is missing, emit (un)health(y) event (inherited if subscription exists)
+		// Create condition parameters + relatedObj parameters
+	// } 
+	if !isMissing {
+		// CatalogSource is found
+		// Convert from unstruct to typed object
+		catalogSrcUnstruct := foundCatalogSrc.DeepCopy()
+		catalogSrc := new(operatorv1alpha1.CatalogSource)
+
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(catalogSrcUnstruct.Object, catalogSrc); err != nil {
+			return fmt.Errorf("error converting the retrieved CatalogSource to the Go type: %w", err)
+		}
+
+		// Check the last observed state of the CatalogSource
+		CatalogSrcState := catalogSrc.Status.GRPCConnectionState.LastObservedState
+
+		if CatalogSrcState == CatalogSourceReady {
+			// Emit healthy event (inherited if subscription exists)
+			// Create condition parameters + relatedObj parameters
+			isUnhealthy = false
+		} else {
+			// Emit unhealthy event (templated since this error not detected by the status type "CatalogSourceUnhealthy")
+			// Create condition parameters + relatedObj parameters
+			isUnhealthy = true
+		}
+	}
+
+	// Report status of CatalogSource to policy based on subscription existence
+	// This determines if the message will be inherited or templated
+	subExists := true
+	if subscription == nil || len(subscription.Status.Conditions) == 0 {
+		subExists = false
+	}
+
+	if isUnhealthy && !isMissing {
+		// template event
+		err := r.updateStatus(ctx, policy, catalogSourceFindCond(isUnhealthy, isMissing), catalogSourceObj(catalogName, catalogNS, isUnhealthy, isMissing))
+		if err != nil {
+			return fmt.Errorf("error updating the status for an existing, unhealthy CatalogSource: %w", err)
+		}
+	} else {
+		if subExists {
+			// Inherit
+			// Iterate over all the conditions to determine the state of the CatalogSource
+			for _, condition := range subscription.Status.Conditions {
+				if string(condition.Type) == string(catalogSrcConditionType) {
+					status := metav1.ConditionFalse
+					if string(condition.Status) == string(metav1.ConditionTrue) {
+						status = metav1.ConditionTrue
+					}
+		
+					unhealthyStatus := string(condition.Status) == string(metav1.ConditionTrue)
+		
+					healthCondition := metav1.Condition{
+						Type:               catalogSrcConditionType,
+						Status:             status,
+						LastTransitionTime: *condition.LastTransitionTime,
+						Reason:             condition.Reason,
+						Message:            condition.Message,
+					}
+		
+					err := r.updateStatus(ctx, policy, healthCondition, catalogSourceObj(catalogName, catalogNS, unhealthyStatus, isMissing))
+					if err != nil {
+						return fmt.Errorf("error updating the status for a missing CatalogSource: %w", err)
+					}
+				}
+			}
+		} else {
+			// Templated
+			err := r.updateStatus(ctx, policy, catalogSourceFindCond(isUnhealthy, isMissing), catalogSourceObj(catalogName, catalogNS, isUnhealthy, isMissing))
+			if err != nil {
+				return fmt.Errorf("error updating the status for CatalogSource when Subscription DNE on cluster: %w", err)
+			}
+		}
+	}
+
+	// err = r.updateStatus(ctx, policy, catalogSourceFindCond(true, isMissing),
+	// 	catalogSourceObj(catalogName, catalogNS, isMissing, true))
+	// if err != nil {
+	// 	return fmt.Errorf("error updating the status for CatalogSource when Subscription DNE on cluster: %w", err)
+	// }
+
+	// return nil
+	// }
 
 	// Iterate over all the conditions to determine the state of the CatalogSource
-	for _, condition := range subscription.Status.Conditions {
-		if string(condition.Type) == string(catalogSrcConditionType) {
-			status := metav1.ConditionFalse
-			if string(condition.Status) == string(metav1.ConditionTrue) {
-				status = metav1.ConditionTrue
-			}
+	// for _, condition := range subscription.Status.Conditions {
+	// 	if string(condition.Type) == string(catalogSrcConditionType) {
+	// 		status := metav1.ConditionFalse
+	// 		if string(condition.Status) == string(metav1.ConditionTrue) {
+	// 			status = metav1.ConditionTrue
+	// 		}
 
-			isUnhealthy := string(condition.Status) == string(metav1.ConditionTrue)
+	// 		isUnhealthy := string(condition.Status) == string(metav1.ConditionTrue)
 
-			healthCondition := metav1.Condition{
-				Type:               catalogSrcConditionType,
-				Status:             status,
-				LastTransitionTime: *condition.LastTransitionTime,
-				Reason:             condition.Reason,
-				Message:            condition.Message,
-			}
+	// 		healthCondition := metav1.Condition{
+	// 			Type:               catalogSrcConditionType,
+	// 			Status:             status,
+	// 			LastTransitionTime: *condition.LastTransitionTime,
+	// 			Reason:             condition.Reason,
+	// 			Message:            condition.Message,
+	// 		}
 
-			err := r.updateStatus(ctx, policy, healthCondition, catalogSourceObj(catalogName, catalogNS, isUnhealthy))
-			if err != nil {
-				return fmt.Errorf("error updating the status for a missing CatalogSource: %w", err)
-			}
-		}
-	}
+	// 		err := r.updateStatus(ctx, policy, healthCondition, catalogSourceObj(catalogName, catalogNS, isUnhealthy, false))
+	// 		if err != nil {
+	// 			return fmt.Errorf("error updating the status for a missing CatalogSource: %w", err)
+	// 		}
+	// 	}
+	// }
 
 	return nil
 }

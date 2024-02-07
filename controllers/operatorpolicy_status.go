@@ -387,15 +387,20 @@ var opGroupTooManyCond = metav1.Condition{
 
 // catalogSourceFindCond is a conditionally compliant condition with reason
 // based on the `isMissing` parameter
-func catalogSourceFindCond(isMissing bool) metav1.Condition {
+func catalogSourceFindCond(isUnhealthy bool, isMissing bool) metav1.Condition {
+
 	status := metav1.ConditionFalse
 	reason := "CatalogSourcesFound"
 	message := "CatalogSource was found"
 
-	if isMissing {
+	if isUnhealthy {
 		status = metav1.ConditionTrue
-		reason = "CatalogSourcesNotFound"
-		message = "CatalogSource was not found"
+		reason = "CatalogSourcesFoundUnhealthy"
+		message = "CatalogSource was found but is unhealthy"
+		if isMissing {
+			reason = "CatalogSourcesNotFound"
+			message = "CatalogSource was not found"
+		}
 	}
 
 	return metav1.Condition{
@@ -407,13 +412,19 @@ func catalogSourceFindCond(isMissing bool) metav1.Condition {
 }
 
 // catalogSourceObj returns a conditionally compliant RelatedObject with reason based on the `isMissing` parameter
-func catalogSourceObj(catalogName string, catalogNS string, isUnhealthy bool) policyv1.RelatedObject {
-	compliance := string(policyv1.NonCompliant)
-	reason := reasonWantFoundDNE
+func catalogSourceObj(catalogName string, catalogNS string, isUnhealthy bool, isMissing bool) policyv1.RelatedObject {
 
-	if !isUnhealthy {
-		compliance = string(policyv1.Compliant)
-		reason = reasonWantFoundExists
+	compliance := string(policyv1.Compliant)
+	reason := reasonWantFoundExists
+
+	if isUnhealthy {
+		compliance = string(policyv1.NonCompliant)
+		reason = reasonWantFoundExists + " but is unhealthy"
+
+		if isMissing {
+			// If it doesn't exist, we don't know if it's truly unhealthy because its not running
+			reason = reasonWantFoundDNE
+		}
 	}
 
 	return policyv1.RelatedObject{
