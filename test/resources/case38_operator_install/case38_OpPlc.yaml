@@ -3,7 +3,7 @@ kind: OperatorPolicy
 metadata:
   name: test-operator-policy
 spec:
-  remediationAction: inform # or inform
+  remediationAction: enforce # or inform
   severity: medium
   complianceType: musthave # or mustnothave
   operatorGroup: # optional

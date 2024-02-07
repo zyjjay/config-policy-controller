@@ -407,19 +407,19 @@ func catalogSourceFindCond(isMissing bool) metav1.Condition {
 }
 
 // catalogSourceObj returns a conditionally compliant RelatedObject with reason based on the `isMissing` parameter
-func catalogSourceObj(catalogName string, catalogNS string, isMissing bool) policyv1.RelatedObject {
+func catalogSourceObj(catalogName string, catalogNS string, isUnhealthy bool) policyv1.RelatedObject {
 	compliance := string(policyv1.NonCompliant)
 	reason := reasonWantFoundDNE
 
-	if !isMissing {
+	if !isUnhealthy {
 		compliance = string(policyv1.Compliant)
 		reason = reasonWantFoundExists
 	}
 
 	return policyv1.RelatedObject{
 		Object: policyv1.ObjectResource{
-			Kind:       "CatalogSource",
-			APIVersion: "operators.coreos.com/v1alpha1",
+			Kind:       catalogSrcGVK.Kind,
+			APIVersion: catalogSrcGVK.GroupVersion().String(),
 			Metadata: policyv1.ObjectMetadata{
 				Name:      catalogName,
 				Namespace: catalogNS,

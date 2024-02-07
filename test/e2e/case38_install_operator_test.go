@@ -568,7 +568,7 @@ var _ = Describe("Test installing an operator from OperatorPolicy", Ordered, fun
 				OpPlcYAML, opPolTestNS, gvrPolicy, gvrOperatorPolicy)
 		})
 
-		It("Should initially be Compliant", func() {
+		It("Should initially show the CatalogSource is compliant", func() {
 			check(
 				OpPlcName,
 				false,

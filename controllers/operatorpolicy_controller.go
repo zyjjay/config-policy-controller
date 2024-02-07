@@ -164,10 +164,23 @@ func (r *OperatorPolicyReconciler) handleCatalogSource(
 ) error {
 	watcher := opPolIdentifier(policy.Namespace, policy.Name)
 
-	catalogName := subscription.Spec.CatalogSource
-	catalogNS := subscription.Spec.CatalogSourceNamespace
+	var catalogName string
+	var catalogNS string
 
-	if len(subscription.Status.Conditions) == 0 {
+	if subscription == nil {
+		sub, err := buildSubscription(policy)
+		if err != nil {
+			return fmt.Errorf("error building Subscription: %w", err)
+		}
+
+		catalogName = sub.Spec.CatalogSource
+		catalogNS = sub.Spec.CatalogSourceNamespace
+	} else {
+		catalogName = subscription.Spec.CatalogSource
+		catalogNS = subscription.Spec.CatalogSourceNamespace
+	}
+
+	if subscription == nil || len(subscription.Status.Conditions) == 0 {
 		// Subscription not found, check the CatalogSource object
 		foundCatalogSrc, err := r.DynamicWatcher.Get(watcher, catalogSrcGVK,
 			catalogNS, catalogName)
@@ -189,23 +202,23 @@ func (r *OperatorPolicyReconciler) handleCatalogSource(
 
 	// Iterate over all the conditions to determine the state of the CatalogSource
 	for _, condition := range subscription.Status.Conditions {
-		if condition.Type == catalogSrcConditionType {
+		if string(condition.Type) == string(catalogSrcConditionType) {
 			status := metav1.ConditionFalse
 			if string(condition.Status) == string(metav1.ConditionTrue) {
 				status = metav1.ConditionTrue
 			}
 
-			isMissing := string(condition.Status) == string(metav1.ConditionTrue)
+			isUnhealthy := string(condition.Status) == string(metav1.ConditionTrue)
 
 			healthCondition := metav1.Condition{
-				Type:               string(condition.Type),
+				Type:               catalogSrcConditionType,
 				Status:             status,
 				LastTransitionTime: *condition.LastTransitionTime,
 				Reason:             condition.Reason,
 				Message:            condition.Message,
 			}
 
-			err := r.updateStatus(ctx, policy, healthCondition, catalogSourceObj(catalogName, catalogNS, isMissing))
+			err := r.updateStatus(ctx, policy, healthCondition, catalogSourceObj(catalogName, catalogNS, isUnhealthy))
 			if err != nil {
 				return fmt.Errorf("error updating the status for a missing CatalogSource: %w", err)
 			}
